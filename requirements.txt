@@ -1,0 +1,18 @@
+# Requirements for Snowflake Streamlit Deployment
+# Only includes packages available in Snowflake environment
+
+# Core libraries
+streamlit>=1.28.0
+pandas>=1.5.0
+openpyxl>=3.1.0
+
+# Document processing - use PyPDF2 instead of PyMuPDF for Snowflake
+# Note: pytesseract/OCR not available in Snowflake
+PyPDF2>=3.0.0
+Pillow>=9.5.0
+
+# AI processing - not available in Snowflake
+# google-generativeai>=0.3.0  # Not available in Snowflake
+
+# Additional utilities
+# pathlib2>=2.3.7  # Not needed, using built-in pathlib
