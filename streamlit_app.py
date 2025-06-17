@@ -79,17 +79,24 @@ def check_environment_capabilities():
         'ocr_available': False,
         'ai_available': False,
         'pdf_library': 'None',
-        'is_cloud_environment': False
+        'is_cloud_environment': False,
+        'is_snowflake': False,
+        'debug_info': {}  # Add debug information
     }
     
-    # Detect cloud/Snowflake environment
-    cloud_indicators = [
-        'STREAMLIT_SHARING_MODE' in os.environ,
+    # Detect Snowflake environment specifically (not all cloud environments)
+    snowflake_indicators = [
         'SNOWFLAKE' in str(os.environ),
         any('SNOWFLAKE' in key for key in os.environ.keys()),
-        'STREAMLIT_CLOUD' in os.environ
+        # Check for Snowflake-specific environment variables
+        'SNOWFLAKE_WAREHOUSE' in os.environ,
+        'SNOWFLAKE_DATABASE' in os.environ
     ]
-    capabilities['is_cloud_environment'] = any(cloud_indicators)
+    capabilities['is_snowflake'] = any(snowflake_indicators)
+    capabilities['debug_info']['snowflake_indicators'] = snowflake_indicators
+    
+    # Only consider it a limited cloud environment if it's specifically Snowflake
+    capabilities['is_cloud_environment'] = capabilities['is_snowflake']
     
     # Check PDF processing
     try:
@@ -101,24 +108,33 @@ def check_environment_capabilities():
             import PyPDF2
             capabilities['pdf_processing'] = True
             capabilities['pdf_library'] = 'PyPDF2 (Compatible)'
-        except ImportError:
-            pass
+        except ImportError:            pass
     
-    # Check OCR (usually not available in cloud environments)
-    if not capabilities['is_cloud_environment']:
-        try:
-            import pytesseract
-            capabilities['ocr_available'] = True
-        except ImportError:
-            pass
-    
-    # Check AI (usually not available in cloud environments like Snowflake)
-    if not capabilities['is_cloud_environment']:
-        try:
-            import google.generativeai
-            capabilities['ai_available'] = True
-        except ImportError:
-            pass
+    # Check OCR (may not be available in some cloud environments)
+    try:
+        import pytesseract
+        # Test if pytesseract can actually run (not just imported)
+        pytesseract.get_tesseract_version()
+        capabilities['ocr_available'] = True
+    except (ImportError, Exception):
+        capabilities['ocr_available'] = False
+      # Check AI availability by actually trying to import (not based on environment)
+    ai_error = None
+    try:
+        import google.generativeai
+        capabilities['ai_available'] = True
+        capabilities['debug_info']['ai_import_success'] = True
+        capabilities['debug_info']['ai_version'] = getattr(google.generativeai, '__version__', 'Unknown')
+    except ImportError as e:
+        capabilities['ai_available'] = False
+        ai_error = str(e)
+        capabilities['debug_info']['ai_import_success'] = False
+        capabilities['debug_info']['ai_import_error'] = ai_error
+    except Exception as e:
+        capabilities['ai_available'] = False
+        ai_error = str(e)
+        capabilities['debug_info']['ai_import_success'] = False
+        capabilities['debug_info']['ai_import_error'] = f"Unexpected error: {ai_error}"
     
     return capabilities
 
@@ -180,14 +196,18 @@ def setup_api_key():
                 except ImportError:
                     st.sidebar.warning("⚠️ API Key found in file but AI libraries not available")
         except Exception as e:
-            st.sidebar.warning(f"⚠️ Could not read API key file: {e}")
-    
-    # Handle cloud environment or missing AI libraries
-    if capabilities['is_cloud_environment']:
-        st.sidebar.info("🏔️ **Cloud Environment Detected**")
-        st.sidebar.markdown("AI libraries not available. App will run in manual mode.")
+            st.sidebar.warning(f"⚠️ Could not read API key file: {e}")    
+    # Handle different environments based on actual AI availability
+    if not capabilities['ai_available']:
+        if capabilities['is_snowflake']:
+            st.sidebar.info("🏔️ **Snowflake Environment Detected**")
+            st.sidebar.markdown("AI libraries not available. App will run in manual mode.")
+        else:
+            # AI libraries not available but not in Snowflake - show installation help
+            st.sidebar.warning("⚠️ **AI Libraries Not Available**")
+            st.sidebar.markdown("Install google-generativeai or configure API key to enable AI processing.")
     else:
-        # Option 4: Allow user to input API key (only in non-cloud environments)
+        # AI libraries are available - allow API key configuration
         st.sidebar.info("💡 **API Key Options:**")
         st.sidebar.markdown("""
         **For IT Administrators:**
@@ -207,20 +227,16 @@ def setup_api_key():
         
         if api_key:
             try:
-                # Test if AI libraries are available
-                import google.generativeai
                 st.session_state.automation = ConstructionCostAutomation(api_key)
                 st.session_state.api_key_set = True
                 st.sidebar.success("✅ API Key configured successfully")
                 return True
-            except ImportError:
-                st.sidebar.error("❌ AI libraries not available in this environment")
             except Exception as e:
                 st.sidebar.error(f"❌ Error configuring API: {e}")
                 return False
-        else:
-            st.sidebar.warning("⚠️ Please enter your Gemini API key to use AI processing")
-      # Fallback to manual mode
+        else:            st.sidebar.warning("⚠️ Please enter your Gemini API key to use AI processing")
+    
+    # Fallback to manual mode
     st.sidebar.info("💡 Manual processing mode available - no AI needed")
     st.session_state.api_key_set = False
     if st.session_state.automation is None:
@@ -422,15 +438,16 @@ def main():
     # Header
     st.markdown('<h1 class="main-header">🏗️ Construction Cost Breakdown Automation</h1>', unsafe_allow_html=True)
     
-    # Display environment info
-    capabilities = check_environment_capabilities()
+    # Display environment info    capabilities = check_environment_capabilities()
     
     # Environment status in sidebar
     st.sidebar.markdown("### 🔧 Environment Status")
     
-    if capabilities['is_cloud_environment']:
-        st.sidebar.info("🏔️ **Cloud Environment Detected**")
-        st.sidebar.markdown("Optimized for cloud deployment")
+    # Show Snowflake-specific message only for actual Snowflake environments
+    if capabilities['is_snowflake']:
+        st.sidebar.info("🏔️ **Snowflake Environment Detected**")
+    elif capabilities['is_cloud_environment']:
+        st.sidebar.info("☁️ **Cloud Environment**")
     
     if capabilities['pdf_processing']:
         st.sidebar.success(f"✅ PDF Processing: {capabilities['pdf_library']}")
@@ -438,25 +455,48 @@ def main():
         st.sidebar.error("❌ PDF Processing: Not Available")
         st.sidebar.info("💡 Install PyPDF2 or PyMuPDF for PDF support")
     
-    if capabilities['is_cloud_environment']:
-        st.sidebar.info("ℹ️ Image OCR: Not Available in Cloud")
-        st.sidebar.markdown("💡 **Tip:** Convert images to PDF before uploading")
-    elif capabilities['ocr_available']:
+    if capabilities['ocr_available']:
         st.sidebar.success("✅ Image OCR: Available")
     else:
         st.sidebar.warning("⚠️ Image OCR: Not Available")
-        st.sidebar.info("💡 Tip: Convert images to PDF for processing")
+        if capabilities['is_snowflake']:
+            st.sidebar.info("💡 **Snowflake:** Convert images to PDF before uploading")
+        else:
+            st.sidebar.info("💡 **Tip:** Install Tesseract for OCR support")
     
     st.sidebar.success("✅ Excel Processing: Available")
-    
-    if capabilities['is_cloud_environment']:
-        st.sidebar.info("ℹ️ Manual Mode: Active")
-        st.sidebar.markdown("🛠️ **Cloud Mode** - Manual data entry workflow")
-    elif capabilities['ai_available']:
+      # Show AI status based on actual availability, not environment assumptions
+    if capabilities['ai_available']:
         st.sidebar.success("✅ AI Processing: Available")
     else:
-        st.sidebar.warning("⚠️ AI Processing: Not Configured")
-        st.sidebar.info("💡 Configure Gemini API key for AI features")
+        if capabilities['is_snowflake']:
+            st.sidebar.info("ℹ️ AI Processing: Not Available in Snowflake")
+            st.sidebar.markdown("🛠️ **Manual Mode:** Extract and enter data manually")
+        else:
+            st.sidebar.warning("⚠️ AI Processing: Not Available")
+            st.sidebar.info("💡 Install google-generativeai library or configure API key")
+    
+    # Debug information (if requested)
+    if st.sidebar.checkbox("🔍 Show Debug Info", help="Show detailed environment and capability information"):
+        st.sidebar.markdown("### 🔧 Debug Information")
+        debug_info = capabilities.get('debug_info', {})
+        
+        # Show environment detection
+        st.sidebar.write(f"**Snowflake detected:** {capabilities['is_snowflake']}")
+        if 'snowflake_indicators' in debug_info:
+            st.sidebar.write(f"**Snowflake indicators:** {debug_info['snowflake_indicators']}")
+        
+        # Show AI detection details
+        st.sidebar.write(f"**AI available:** {capabilities['ai_available']}")
+        if 'ai_import_success' in debug_info:
+            st.sidebar.write(f"**AI import success:** {debug_info['ai_import_success']}")
+        if 'ai_import_error' in debug_info:
+            st.sidebar.error(f"**AI import error:** {debug_info['ai_import_error']}")
+        if 'ai_version' in debug_info:
+            st.sidebar.write(f"**AI library version:** {debug_info['ai_version']}")
+        
+        # Show all capabilities
+        st.sidebar.json(capabilities)
     
     # Description with dynamic capabilities
     supported_files = "Excel files (.xlsx, .xls)"
